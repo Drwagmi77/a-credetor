@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { PromptItem, Character } from '../types';
-import { X, Wand2, Download, RefreshCw, AlertCircle, ImagePlus, Trash2, Sparkles, User } from 'lucide-react';
-import { GoogleGenAI } from "@google/genai";
+import React, { useState, useEffect } from 'react';
+import { PromptItem } from '../types';
+import { X, Wand2, Download, RefreshCw, AlertCircle, User } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
+import { GoogleGenAI } from "@google/genai";
 
 interface DetailModalProps {
   item: PromptItem | null;
@@ -16,12 +16,9 @@ interface DetailModalProps {
 const DetailModal: React.FC<DetailModalProps> = ({ item, isOpen, onClose, onImageGenerated, isPremiumUser = false, onOpenPremium }) => {
   const { t } = useLanguage();
   const [subject, setSubject] = useState('');
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Check if this item is a specific "Character Card"
   const isPersonaMode = item?.category === 'ai_personas' || !!item?.characterId;
@@ -30,15 +27,12 @@ const DetailModal: React.FC<DetailModalProps> = ({ item, isOpen, onClose, onImag
     if (isOpen && item) {
       // Reset State on Open
       if (isPersonaMode) {
-          // In Persona Mode, we want the input empty so user types an action
           setSubject('');
       } else {
-          // In Style Mode, default to the title sans prefix usually
           const defaultSubject = item.title.split(' ').slice(1).join(' ');
           setSubject(defaultSubject);
       }
       
-      setReferenceImage(null);
       setGeneratedImage(null);
       setError(null);
       document.body.style.overflow = 'hidden';
@@ -52,112 +46,60 @@ const DetailModal: React.FC<DetailModalProps> = ({ item, isOpen, onClose, onImag
 
   if (!isOpen || !item) return null;
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setReferenceImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const clearReferenceImage = () => {
-    setReferenceImage(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
-
   const handleGenerate = async () => {
-    if (!process.env.API_KEY) {
-      setError(t('error_api'));
-      return;
-    }
-
     setIsGenerating(true);
     setError(null);
     setGeneratedImage(null);
 
-    const callGenAI = async (modelName: string, prompt: string, aspectRatio: string, parts: any[]) => {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: { parts: parts },
-        config: { imageConfig: { aspectRatio: aspectRatio } },
-      });
-
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          const base64EncodeString = part.inlineData.data;
-          return `data:image/png;base64,${base64EncodeString}`;
-        }
-      }
-      return null;
-    };
+    if (!process.env.API_KEY) {
+       setError(t('error_api') || "API Key is missing in environment.");
+       setIsGenerating(false);
+       return;
+    }
 
     try {
       // Construct prompt
-      // For Personas: template contains character desc + {subject} (which is action)
-      // For Styles: template contains style + {subject} (which is subject)
       const finalPrompt = item.template.replace('{subject}', subject || (isPersonaMode ? 'standing confidently' : 'something amazing'));
+      // Keep technical terms like '8k', 'detailed' for Gemini as it helps with quality
+      const promptToSend = finalPrompt;
 
-      // Remove --ar flags if present in template as we handle aspect ratio via config
-      const cleanPrompt = finalPrompt.replace(/--ar\s+\d+:\d+/g, '').trim();
-
-      let targetAspectRatio = "1:1";
-      if (item.aspectRatio === 'portrait') targetAspectRatio = "3:4";
-      if (item.aspectRatio === 'landscape') targetAspectRatio = "16:9";
-
-      const parts: any[] = [];
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      // Add reference image if it exists (Image-to-Image)
-      if (referenceImage) {
-        const base64Data = referenceImage.split(',')[1];
-        const mimeType = referenceImage.split(';')[0].split(':')[1];
-        parts.push({
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Data
-          }
-        });
-      }
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: {
+          parts: [{ text: promptToSend }]
+        }
+      });
 
-      // Add text prompt
-      parts.push({ text: cleanPrompt });
-
-      let imageUrl: string | null = null;
-
-      try {
-        // Try Pro Model first
-        imageUrl = await callGenAI('gemini-3-pro-image-preview', cleanPrompt, targetAspectRatio, parts);
-      } catch (err: any) {
-        const errCode = err?.error?.code || err?.status;
-        const errMsg = (err?.message || "").toLowerCase();
-        
-        if (errCode === 403 || errCode === 404 || errMsg.includes('permission') || errMsg.includes('not found')) {
-            console.warn("Pro model failed, falling back to Flash");
-            // Fallback to Flash
-            imageUrl = await callGenAI('gemini-2.5-flash-image', cleanPrompt, targetAspectRatio, parts);
-        } else {
-            throw err;
+      let base64Image = "";
+      
+      // Extract image data from response
+      const candidates = response.candidates;
+      if (candidates && candidates.length > 0) {
+        const parts = candidates[0].content.parts;
+        for (const part of parts) {
+            if (part.inlineData && part.inlineData.data) {
+                base64Image = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                break;
+            }
         }
       }
 
-      if (imageUrl) {
-        setGeneratedImage(imageUrl);
-        if (onImageGenerated) {
-            onImageGenerated(imageUrl);
-        }
+      if (base64Image) {
+         setGeneratedImage(base64Image);
+         if (onImageGenerated) {
+            onImageGenerated(base64Image);
+         }
       } else {
-        setError(t('error_gen'));
+         throw new Error("No image data returned from Gemini");
       }
+      
+      setIsGenerating(false);
 
     } catch (err: any) {
       console.error(err);
-      setError(err.message || t('error_gen'));
-    } finally {
+      setError(t('error_gen') || "Generation failed. Please try again.");
       setIsGenerating(false);
     }
   };
@@ -173,7 +115,6 @@ const DetailModal: React.FC<DetailModalProps> = ({ item, isOpen, onClose, onImag
     }
   };
 
-  // Simple icon wrapper for the hint text
   const HintIcon = ({ size }: { size: number }) => (
     <svg 
       width={size} 
@@ -260,6 +201,7 @@ const DetailModal: React.FC<DetailModalProps> = ({ item, isOpen, onClose, onImag
                   onChange={(e) => setSubject(e.target.value)}
                   placeholder={isPersonaMode ? (t('modal_input_placeholder_persona') || "e.g. drinking coffee") : t('modal_input_placeholder')}
                   className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-4 text-white placeholder-gray-500 focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all text-lg"
+                  onKeyDown={(e) => e.key === 'Enter' && !isGenerating && subject.trim() && handleGenerate()}
                 />
                 <p className="text-xs text-gray-500 mt-2 flex items-center gap-1">
                    <HintIcon size={12} />
@@ -268,48 +210,6 @@ const DetailModal: React.FC<DetailModalProps> = ({ item, isOpen, onClose, onImag
                      : t('modal_input_help')}
                 </p>
               </div>
-              
-              {/* Reference Image Upload Section - ONLY for styles, NOT for Personas (to keep persona logic pure) */}
-              {!isPersonaMode && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2 uppercase tracking-wide">
-                      {t('modal_ref_image_label')}
-                    </label>
-                    
-                    {!referenceImage ? (
-                      <div 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="w-full h-16 border-2 border-dashed border-white/20 hover:border-primary/50 rounded-xl flex items-center justify-center gap-3 cursor-pointer transition-colors bg-white/5 hover:bg-white/10 group"
-                      >
-                         <div className="p-1.5 bg-white/5 rounded-full group-hover:bg-primary/20 transition-colors">
-                           <ImagePlus size={16} className="text-gray-400 group-hover:text-primary" />
-                         </div>
-                         <span className="text-xs text-gray-400 group-hover:text-white">{t('modal_ref_image_placeholder')}</span>
-                      </div>
-                    ) : (
-                      <div className="relative w-full h-20 rounded-xl overflow-hidden group border border-white/10">
-                        <img src={referenceImage} alt="Reference" className="w-full h-full object-cover" />
-                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                           <button 
-                             onClick={clearReferenceImage}
-                             className="bg-red-500/80 hover:bg-red-600 text-white px-2 py-1 rounded-full flex items-center gap-1 text-[10px] font-medium backdrop-blur-sm"
-                           >
-                             <Trash2 size={10} />
-                             {t('modal_ref_remove')}
-                           </button>
-                        </div>
-                      </div>
-                    )}
-                    
-                    <input 
-                      type="file" 
-                      ref={fileInputRef} 
-                      onChange={handleFileChange} 
-                      accept="image/*"
-                      className="hidden" 
-                    />
-                  </div>
-              )}
 
               {error && (
                 <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3 text-red-400 text-sm">

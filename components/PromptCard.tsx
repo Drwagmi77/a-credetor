@@ -40,6 +40,7 @@ const PromptCard: React.FC<PromptCardProps> = ({ item, onClick }) => {
           src={imgSrc} 
           alt={item.title}
           onError={handleError}
+          decoding="async"
           className="w-full h-auto object-cover transform transition-transform duration-700 group-hover:scale-110"
           loading="lazy"
         />
